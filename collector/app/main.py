@@ -29,6 +29,8 @@ async def lifespan(app: FastAPI):
     # 上次进程退出可能遗留半截临时文件，统一清理（正式归档件不受影响）
     for p in settings.tmp_dir.glob("*.part"):
         p.unlink(missing_ok=True)
+    # 演示标记属一次性信号，随进程退出失效
+    settings.receipt_lost_marker.unlink(missing_ok=True)
 
     db = Db(str(settings.db_path))
     await db.open()
@@ -115,6 +117,7 @@ async def build_progress(ctx: core.Ctx) -> dict:
     return {
         "running": ctx.lock.locked(),
         "crash_armed": settings.crash_flag.exists(),
+        "lose_receipt_armed": bool(ctx.sftp.lose_next_receipt),
         "batch": batch,
         "counts": await db.batch_status_counts(batch["id"]) if batch else {},
         "files": files,
@@ -190,4 +193,21 @@ async def arm_crash():
 @app.delete("/api/demo/crash-after-claim")
 async def disarm_crash():
     settings.crash_flag.unlink(missing_ok=True)
+    return {"armed": False}
+
+
+@app.post("/api/demo/lose-receipt")
+async def arm_lose_receipt(request: Request):
+    """武装“认领回执丢失”演示：下一次认领改名在服务器生效后，客户端按回执
+    随断线丢失处理（重试将报源路径不存在），用于验证同名重投下的认领恢复。"""
+    ctx = ctx_of(request)
+    settings.receipt_lost_marker.unlink(missing_ok=True)
+    ctx.sftp.lose_next_receipt = True
+    return {"armed": True}
+
+
+@app.delete("/api/demo/lose-receipt")
+async def disarm_lose_receipt(request: Request):
+    ctx_of(request).sftp.lose_next_receipt = False
+    settings.receipt_lost_marker.unlink(missing_ok=True)
     return {"armed": False}

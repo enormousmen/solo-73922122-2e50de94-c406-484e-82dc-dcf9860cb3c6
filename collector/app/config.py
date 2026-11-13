@@ -21,6 +21,8 @@ class Settings:
         self.cleanup_retry_interval: float = float(os.getenv("CLEANUP_RETRY_INTERVAL", "15"))
         # 文件名过滤
         self.file_suffix: str = os.getenv("FILE_SUFFIX", ".csv")
+        # 演示：认领改名“回执丢失”后、重试前的等待窗口（秒），供仪器同名重投
+        self.receipt_lost_window: float = float(os.getenv("DEMO_RECEIPT_LOST_WINDOW", "6"))
 
     # ---- 派生路径 ----
     @property
@@ -43,6 +45,12 @@ class Settings:
     def crash_flag(self) -> Path:
         # 演示用：存在该标记文件时，采集器在“认领完成、尚未下载”时主动退出进程
         return self.flags_dir / "crash_after_claim"
+
+    @property
+    def receipt_lost_marker(self) -> Path:
+        # 演示用：改名已在服务器生效、回执按“丢失”注入时创建该标记，
+        # 演示脚本据此在重试前的窗口期内同名重投
+        return self.flags_dir / "receipt_lost"
 
     def ensure_dirs(self) -> None:
         for p in (self.data_dir, self.tmp_dir, self.archive_dir, self.flags_dir):

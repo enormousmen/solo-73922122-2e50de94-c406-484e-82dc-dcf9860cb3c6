@@ -4,11 +4,15 @@
   1. 先把投递目录的文件改名移入独立认领目录 /claim/batch_<id>/（先登记后改名，
      改名确认后才标记 claimed）。此后投递的同名新件位于投递目录，旧任务只引用
      自己的认领路径，永远不会下载或删除新件。
-  2. 原件完整落盘（临时文件 + fsync + 原子改名）并与来源索引（文件名/来源路径/
+  2. 改名回执可能随断线丢失（服务器已执行、响应未收到）：重试报“源路径不存在”
+     时，只要认领目标已存在即视为认领成功——目标路径为本任务专属；源路径上的
+     同名新件与本任务无关，不得据此把旧件误判为 lost。
+  3. 原件完整落盘（临时文件 + fsync + 原子改名）并与来源索引（文件名/来源路径/
      大小/SHA-256/时间）在同一事务发布后，才删除远端认领件。
-  3. 删除失败仅标记 cleanup_pending（待清理），已发布原件照常可下载。
-  4. 任何中断（断线/写盘失败/进程退出）后，resume_incomplete() 负责续办：
-     包括远端已认领但本地尚未登记的孤儿文件；认领路径有唯一约束，
+  4. 删除失败仅标记 cleanup_pending（待清理），已发布原件照常可下载。
+  5. 任何中断（断线/写盘失败/进程退出）后，resume_incomplete() 负责续办：
+     包括远端已认领但本地尚未登记的孤儿文件，以及曾被误标 lost 但认领件仍在
+     的记录（自动恢复为已认领并归档，标记 recovered）；认领路径有唯一约束，
      落盘有同哈希复用，不会重复归档。
 """
 from __future__ import annotations
@@ -155,6 +159,24 @@ async def resume_incomplete(ctx: Ctx, current_batch_id: Optional[int]) -> None:
     """续办所有未完成事项（启动时、每轮采集前、定时清理都会调用）。"""
     db, sftp = ctx.db, ctx.sftp
 
+    # 0) 曾被误标 lost 但认领件仍在的记录：认领件存在即证明当年改名已成功
+    #    （典型成因：改名回执丢失，重试报源路径不存在，恰逢仪器同名重投，
+    #    旧版存在性检查把旧件误判为 lost）。自动恢复为已认领并续办归档；
+    #    认领件也不存在的保持 lost——真正缺失，明确报告。
+    for row in await db.files_in_states((dbm.LOST,)):
+        if await sftp.exists(row["remote_claim_path"]):
+            logger.warning(
+                "认领件仍在，恢复误标丢失的记录 id=%s: %s",
+                row["id"], row["remote_claim_path"],
+            )
+            await db.update_file(
+                row["id"],
+                status=dbm.CLAIMED,
+                recovered=1,
+                error="认领件仍在，已从误标丢失自动恢复",
+            )
+            await process_file(ctx, await db.get_file(row["id"]))
+
     # 1) 已登记但未完成的行
     for row in await db.files_in_states(dbm.ACTIVE_STATES):
         if row["status"] == dbm.CLAIMING:
@@ -162,6 +184,18 @@ async def resume_incomplete(ctx: Ctx, current_batch_id: Optional[int]) -> None:
             if await sftp.exists(row["remote_claim_path"]):
                 await db.update_file(row["id"], status=dbm.CLAIMED)
             elif await sftp.exists(row["origin_path"]):
+                # 认领件不存在 => 改名从未成功；但源路径上的文件可能已被仪器
+                # 同名重投替换（登记到续办可能间隔很久）。大小与登记时不符则不
+                # 认领：旧件内容已不可得，按真正缺失明确报告；新件留给后续采集。
+                if row["size"] is not None:
+                    cur_size = await sftp.size_of(row["origin_path"])
+                    if cur_size is not None and cur_size != row["size"]:
+                        await db.update_file(
+                            row["id"], status=dbm.LOST,
+                            error=f"源文件在认领前已被同名新件替换"
+                                  f"（登记 {row['size']} 字节，现 {cur_size} 字节）",
+                        )
+                        continue
                 try:
                     # 认领目录可能因极端情况缺失，改名前兜底创建
                     await sftp.makedirs(row["remote_claim_path"].rsplit("/", 1)[0])
@@ -253,6 +287,7 @@ async def scan_and_claim(ctx: Ctx, batch_id: int) -> int:
         try:
             await sftp.rename_checked(origin, claim_path)
         except asyncssh.SFTPNoSuchFile:
+            # rename_checked 已确认认领目标也不存在：源件真正缺失，明确报告
             await db.update_file(fid, status=dbm.LOST, error="认领时源文件已不存在")
             continue
         except Exception as exc:  # noqa: BLE001 - 保持 claiming，留待续办重试

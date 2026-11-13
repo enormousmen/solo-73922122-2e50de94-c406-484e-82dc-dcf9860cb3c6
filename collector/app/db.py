@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS files (
     local_path        TEXT,
     status            TEXT NOT NULL,
     error             TEXT,
+    recovered         INTEGER NOT NULL DEFAULT 0,  -- 曾被误标 lost、因认领件仍在而自动恢复
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     published_at      TEXT
@@ -74,6 +75,13 @@ class Db:
         self.conn = await aiosqlite.connect(self._path)
         self.conn.row_factory = aiosqlite.Row
         await self.conn.executescript(SCHEMA)
+        # 兼容旧版库：补充 recovered 列（已存在则忽略）
+        try:
+            await self.conn.execute(
+                "ALTER TABLE files ADD COLUMN recovered INTEGER NOT NULL DEFAULT 0"
+            )
+        except aiosqlite.OperationalError:
+            pass
         await self.conn.commit()
 
     async def close(self) -> None:

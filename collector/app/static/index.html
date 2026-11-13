@@ -49,11 +49,13 @@
     <div class="row">
       <button id="btnCollect" onclick="triggerCollect()">开始采集</button>
       <button class="warn" id="btnCrash" onclick="armCrash()">武装「认领后退出」演示</button>
+      <button class="warn" id="btnLose" onclick="armLose()">武装「回执丢失」演示</button>
       <span id="runstate" class="mut"></span>
     </div>
     <div class="mut" style="margin-top:8px">
       单进程同时只采一轮；采集中重复点击「开始采集」只返回当前进度，不会并发。
       「待清理」表示远端认领件删除失败，已发布原件仍可下载，系统会自动重试删除。
+      「已恢复」表示该件曾被误标源缺失，因认领件仍在而自动找回并归档。
     </div>
   </div>
 
@@ -130,6 +132,13 @@ async function armCrash() {
     refresh();
   } catch (e) { toast(e.message); }
 }
+async function armLose() {
+  try {
+    await api('/api/demo/lose-receipt', {method:'POST'});
+    toast('已武装：下一次认领改名在服务器生效后按「回执丢失」处理（重试报源路径不存在），可在窗口期内同名重投验证恢复');
+    refresh();
+  } catch (e) { toast(e.message); }
+}
 
 function renderFiles(files) {
   const tb = document.getElementById('files');
@@ -141,8 +150,9 @@ function renderFiles(files) {
     const err = f.error ? `<div class="err">${f.error}</div>` : '';
     const dl = f.downloadable
       ? `<a class="dl" href="/api/files/${f.id}/download" download>下载原件</a>` : '<span class="mut">—</span>';
+    const rec = f.recovered ? ' <span class="badge" style="background:#0e8a6d">已恢复</span>' : '';
     return `<tr><td>${f.id}</td><td class="mono">${f.filename}</td><td>${fmtSize(f.size)}</td>
-      <td>${bar}</td><td>${badge(f.status)}</td><td>${sha}</td><td>${err}</td><td>${dl}</td></tr>`;
+      <td>${bar}</td><td>${badge(f.status)}${rec}</td><td>${sha}</td><td>${err}</td><td>${dl}</td></tr>`;
   }).join('');
 }
 
@@ -172,7 +182,8 @@ async function refresh(skipFiles) {
     document.getElementById('runstate').innerHTML =
       (d.running ? '<span class="dot spin" style="background:#1f6feb"></span>采集/续办进行中'
                  : '<span class="dot" style="background:#2da44e"></span>空闲') +
-      (d.crash_armed ? '　<span class="badge" style="background:#b35900">崩溃演示已武装</span>' : '');
+      (d.crash_armed ? '　<span class="badge" style="background:#b35900">崩溃演示已武装</span>' : '') +
+      (d.lose_receipt_armed ? '　<span class="badge" style="background:#b35900">回执丢失演示已武装</span>' : '');
     renderBatches(d.batches);
     if (!skipFiles) {
       const bid = selectedBatch ?? (d.batch ? d.batch.id : null);

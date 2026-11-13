@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import stat
 from typing import Any, Awaitable, Callable, Optional
@@ -15,6 +16,8 @@ import asyncssh
 from asyncssh.sftp import FILEXFER_TYPE_REGULAR
 
 from .config import Settings
+
+logger = logging.getLogger("collector.sftp")
 
 CHUNK = 256 * 1024
 RECONNECTABLE = (asyncssh.DisconnectError, asyncssh.ConnectionLost, OSError, EOFError)
@@ -25,6 +28,8 @@ class SftpClient:
         self.cfg = cfg
         self._conn: Optional[asyncssh.SSHClientConnection] = None
         self._sftp: Optional[asyncssh.SFTPClient] = None
+        # 演示故障注入：为 True 时，下一次认领改名在服务器生效后按“回执丢失”处理
+        self.lose_next_receipt: bool = False
 
     async def connect(self) -> None:
         self._conn = await asyncssh.connect(
@@ -88,6 +93,14 @@ class SftpClient:
         except asyncssh.SFTPNoSuchFile:
             return False
 
+    async def size_of(self, path: str) -> Optional[int]:
+        """远端文件大小；不存在或查询失败返回 None。"""
+        try:
+            attrs = await self.run(lambda s, p: s.stat(p), path)
+            return attrs.size
+        except asyncssh.SFTPError:
+            return None
+
     async def list_csv(self, path: str, suffix: str) -> list[tuple[str, Optional[int]]]:
         """列出投递目录中的目标文件（跳过临时点文件与子目录）。"""
         try:
@@ -134,12 +147,41 @@ class SftpClient:
                     pass  # 已存在
 
     async def rename_checked(self, src: str, dst: str) -> None:
-        """投递目录 -> 认领目录的改名。断线重试时若改名其实已成功，视为成功。"""
+        """投递目录 -> 认领目录的改名。
+
+        改名回执可能随断线丢失：服务器其实已执行成功，断线重连后的重试会报
+        “源路径不存在”。认领目标路径为本任务专属（/claim/batch_<id>/），只会
+        由本任务的改名创建，因此：
+          - 重试前先查目标：目标已存在即视为认领成功，**不再重复改名**——
+            否则源路径上的同名新件会被改名进认领目录（OpenSSH 的 rename 会
+            静默覆盖已有目标），新件被旧任务偷走、旧认领件被覆盖；
+          - 重试报协议错误时，目标已存在同样视为认领成功。
+        源路径此刻是否存在与本任务无关：仪器可能已投入同名新件，那是下一轮
+        采集的对象，绝不能因此把本任务已认领的件误判为丢失。
+        """
+        async def op(s: asyncssh.SFTPClient, a: str, b: str) -> None:
+            try:
+                await s.stat(b)
+                logger.info("认领目标已存在，此前改名其实已成功，跳过重试: %s", b)
+                return  # 目标为本任务专属：存在即证明此前改名已成功
+            except asyncssh.SFTPNoSuchFile:
+                pass
+            await s.rename(a, b)
+            if self.lose_next_receipt:
+                self.lose_next_receipt = False
+                # 演示故障注入：改名已在服务器生效，但回执随连接“丢失”；
+                # 留出窗口供仪器同名重投，随后重试将真实地报“源路径不存在”
+                self.cfg.receipt_lost_marker.touch()
+                await asyncio.sleep(self.cfg.receipt_lost_window)
+                raise asyncssh.ConnectionLost("演示：改名回执丢失")
+
         try:
-            await self.run(lambda s, a, b: s.rename(a, b), src, dst)
+            await self.run(op, src, dst)
             return
         except asyncssh.SFTPError:
-            if await self.exists(dst) and not await self.exists(src):
+            # 重试报源路径不存在等协议错误：认领目标已存在 => 改名其实已成功
+            if await self.exists(dst):
+                logger.info("改名回执不明，但认领目标已存在，视为认领成功: %s", dst)
                 return
             raise
 
