@@ -1,0 +1,11 @@
+Port 22
+PasswordAuthentication yes
+PermitRootLogin no
+AllowTcpForwarding no
+X11Forwarding no
+Subsystem sftp internal-sftp
+
+# 仪器账号被 chroot 在其家目录：SFTP 视角下 /drop 与 /claim 为根级目录
+Match User instrument
+    ChrootDirectory /home/inst
+    ForceCommand internal-sftp

@@ -1,0 +1,45 @@
+services:
+  sftp:
+    build: ./sftp
+    container_name: csv-sftp
+    volumes:
+      - sftp_drop:/home/inst/drop
+    networks: [archnet]
+
+  seeder:
+    image: alpine:3.20
+    container_name: csv-seeder
+    user: "1000:1000"
+    command: ["sleep", "infinity"]
+    volumes:
+      - sftp_drop:/drop
+      - ./seeder/scripts:/scripts:ro
+    depends_on: [sftp]
+    networks: [archnet]
+
+  collector:
+    build: ./collector
+    container_name: csv-collector
+    ports:
+      - "8080:8000"
+    environment:
+      SFTP_HOST: sftp
+      SFTP_PORT: "22"
+      SFTP_USER: instrument
+      SFTP_PASSWORD: instrument
+      SFTP_DROP_DIR: /drop
+      SFTP_CLAIM_DIR: /claim
+      DATA_DIR: /data
+      CLEANUP_RETRY_INTERVAL: "15"
+    volumes:
+      - collector_data:/data
+    depends_on: [sftp]
+    restart: unless-stopped   # 崩溃/退出后自动拉起，启动时自动续办
+    networks: [archnet]
+
+volumes:
+  sftp_drop:        # 仪器投递目录（采集器不挂载，只经 SFTP 访问）
+  collector_data:   # 采集器本地：SQLite + 归档原件 + 临时区
+
+networks:
+  archnet:
